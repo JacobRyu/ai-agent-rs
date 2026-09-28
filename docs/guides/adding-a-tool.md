@@ -87,5 +87,18 @@ cargo test test_my_tool
 
 - Tool names must be **unique** and use `snake_case`
 - Parameters should follow [JSON Schema](https://json-schema.org/) format
-- Keep responses under 10K chars (enforced by `BashTool` pattern; not required but recommended)
+- Cap tool output so it cannot dominate the LLM context window. `BashTool` uses a
+  10,000-byte budget; reuse that shape, and remember the budget is in **bytes** —
+  truncate on a character boundary, or multi-byte output will panic:
+
+  ```rust
+  const MAX_OUTPUT_BYTES: usize = 10_000;
+
+  if result.len() > MAX_OUTPUT_BYTES {
+      // Snap to a char boundary; `&result[..MAX_OUTPUT_BYTES]` panics on non-ASCII.
+      result.truncate(result.floor_char_boundary(MAX_OUTPUT_BYTES));
+      result.push_str(" ... (truncated to 10000 bytes)");
+  }
+  ```
 - Add tests using `tempfile` if the tool touches the filesystem
+- Add a test that exercises truncation with multi-byte output if the tool truncates

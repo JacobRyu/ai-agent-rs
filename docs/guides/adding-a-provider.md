@@ -38,6 +38,10 @@ impl LLMProvider for OpenAIProvider {
     fn model_name(&self) -> &str {
         &self.model
     }
+
+    // Optional: both default to a non-streaming shim that wraps `chat`.
+    // Override `chat_stream` to stream, and `supports_streaming` to report true,
+    // so `LLMNode` uses your streaming path.
 }
 ```
 
@@ -51,15 +55,25 @@ pub mod openai;
 
 ## Step 3: Use in main.rs
 
-```rust
-use crate::llm::openai::OpenAIProvider;
+Add a branch to `create_provider()` in `src/main.rs`, and the matching env vars to
+`Config` in `src/config.rs`:
 
-let provider: Box<dyn LLMProvider> = if use_openai {
-    Box::new(OpenAIProvider::new(api_key, "gpt-4".into()))
-} else {
-    Box::new(OllamaProvider::new(host, model))
-};
+```rust
+fn create_provider(config: &Config) -> Result<Box<dyn LLMProvider>, AgentError> {
+    match config.llm_provider.as_str() {
+        "openai" => {
+            let api_key = config.openai_api_key.as_ref().ok_or_else(|| {
+                AgentError::LLMError("OPENAI_API_KEY must be set".to_string())
+            })?;
+            Ok(Box::new(OpenAIProvider::new(api_key.clone(), config.openai_model.clone())))
+        }
+        _ => Ok(Box::new(OllamaProvider::new(config.ollama_host.clone(), config.ollama_model.clone()))),
+    }
+}
 ```
+
+Return a `Result` rather than panicking so a missing credential produces a readable
+startup error instead of a backtrace.
 
 ## Key Points
 
@@ -67,4 +81,7 @@ let provider: Box<dyn LLMProvider> = if use_openai {
 - Return `LLMResponse` with either `content` (final answer) or `tool_calls` (function calling)
 - Errors must be wrapped in `AgentError::LLMError(String)`
 - Providers are `Send + Sync` — no interior mutability unless behind a lock
-- Test with mock providers (see `src/agent/react.rs` for examples)
+- `chat_stream()` returns a `BoxStream` of `StreamingChunk`; accumulate `content` and
+  take `tool_calls` from the final `done: true` chunk
+- Test with mock providers — see the `tests` module in `src/agent/mod.rs`
+  (`MockProvider`, `MockChainProvider`) for examples

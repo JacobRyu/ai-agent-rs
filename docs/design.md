@@ -1,5 +1,47 @@
 # AI Agent in Rust — 設計書
 
+> この文書が扱うのは **「なぜそうしたか」** のみ。モジュール構成・実行フロー・依存関係などの
+> 「何がどうなっているか」は [Architecture](architecture.md) を参照してください。
+> 同じ内容を両方に書かないことで、仕様変更時の更新先が明確になります。
+
+## 設計判断マップ
+
+> 解決すべき要求と、そこから導出した設計判断の対応。
+> 各ノードの `§` は本文の該当セクションを指します。
+
+```mermaid
+flowchart TD
+    subgraph Concerns["解決すべき要求"]
+        C1["型安全性<br/>LSP の再現性を保つ"]
+        C2["拡張性<br/>provider / tool / node を後から足す"]
+        C3["テスト容易性<br/>ネットワークなしで検証する"]
+        C4["レイテンシ<br/>1 回の応答で待たされない"]
+        C5["可用性<br/>一部機能が落ちても動く"]
+    end
+
+    subgraph Decisions["導出した設計判断"]
+        D1["core/ に抽象を閉じる<br/>§3.1"]
+        D2["Graph 型オーケストレーション<br/>§2"]
+        D3["Box dyn トレイトと組み込みモック<br/>§5.1 / §5.2"]
+        D4["RAG をオプション扱いにする<br/>§3.5.1"]
+        D5["並列ツール実行<br/>§7.5"]
+        D6["ストリーミング応答<br/>§7.1"]
+        D7["スライディングウィンドウ<br/>§3.6"]
+    end
+
+    C1 --> D1
+    C1 --> D3
+    C2 --> D2
+    C2 --> D1
+    C3 --> D3
+    C4 --> D5
+    C4 --> D6
+    C5 --> D4
+    C5 --> D7
+```
+
+---
+
 ## 1. プロジェクト概要
 
 ### 1.1 目的
@@ -29,51 +71,10 @@ Rust の型安全性とパフォーマンスを活かし、**ローカル LLM（
 
 ---
 
-## 2. アーキテクチャ全体像
+## 2. Graph 型オーケストレーションを選んだ理由
 
-### 2.1 レイヤー構成
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    main.rs (Composition Root)             │
-│  Config → LLM → RAG → Tools → Agent を組み立てる          │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-┌──────────────────────▼──────────────────────────────────┐
-│              GraphAgent (agent/mod.rs)                    │
-│  ┌─────────────────────────────────────────────────────┐ │
-│  │           GraphRunner (State Machine)                │ │
-│  │  ┌────────┐   tool_calls   ┌──────────┐            │ │
-│  │  │ LLMNode│ ─────────────> │ ToolNode │            │ │
-│  │  │  (llm) │ <───────────── │  (tools) │            │ │
-│  │  └───┬────┘  next="llm"   └──────────┘            │ │
-│  │      │ no tool_calls                                │ │
-│  │      ▼ next="__end__"                               │ │
-│  │    [DONE]                                           │ │
-│  └─────────────────────────────────────────────────────┘ │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-┌──────────────────────▼──────────────────────────────────┐
-│              Tool Engine (tools/mod.rs)                    │
-│  ┌──────┐ ┌──────────┐ ┌──────┐ ┌──────┐ ┌──────────┐  │
-│  │ bash │ │read_file │ │write │ │ glob │ │grep      │  │
-│  └──────┘ └──────────┘ └──────┘ └──────┘ └──────────┘  │
-│  ┌───────────────┐                                       │
-│  │ search_docs   │ (optional — RAG が有効な場合のみ)       │
-│  └───────┬───────┘                                       │
-└──────────┼──────────────────────────────────────────────┘
-           │
-┌──────────▼──────────────────────────────────────────────┐
-│              RAG Subsystem (rag/)                         │
-│  EmbeddingProvider ──→ VectorStore                        │
-│  (CandleBERT)           (LanceDB)                         │
-│                                                           │
-│  Indexer: docs → chunk → embed → store                    │
-│  SearchDocsTool: query → embed → search                   │
-└─────────────────────────────────────────────────────────┘
-```
-
-### 2.2 なぜ Graph 型オーケストレーションなのか
+構成図そのものは [Architecture §1「System Composition」](architecture.md#1-system-composition) に
+あります。ここでは「なぜグラフにしたのか」だけを扱います。
 
 **問題**: 単純な ReAct ループ（LLM → Tool → LLM → ...）では、以下の要件に対応できない。
 
@@ -162,9 +163,27 @@ pub struct Message {
 #[async_trait]
 pub trait LLMProvider: Send + Sync {
     async fn chat(&self, messages: &[Message], tools: &[ToolDef]) -> Result<LLMResponse, AgentError>;
+
+    async fn chat_stream<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [ToolDef],
+    ) -> Result<BoxStream<'a, Result<StreamingChunk, AgentError>>, AgentError>;
+
     fn model_name(&self) -> &str;
+
+    fn supports_streaming(&self) -> bool;
+}
+
+pub struct StreamingChunk {
+    pub content: Option<String>,
+    pub tool_calls: Option<Vec<ToolCall>>,
+    pub done: bool,
 }
 ```
+
+`chat_stream` と `supports_streaming` は既定実装を持つため、`chat` と `model_name` のみを実装すれば
+トレイトを満たす。ストリーミングに対応しないプロバイダーはこの既定実装で動作する。詳細は §7.1。
 
 **なぜ `async_trait` なのか**: Rust のネイティブ async fn in trait は `Send` bound の指定が複雑。`async_trait` マクロで `Pin<Box<dyn Future + Send>>` に変換し、`Arc<dyn LLMProvider>` の所有権モデルと整合。
 
@@ -180,9 +199,11 @@ pub trait LLMProvider: Send + Sync {
 - `tokio` ランタイム上でブロッキング HTTP を使うとランタイムを停止させる
 - Ollama の応答は数秒かかる場合があり、非同期でないと REPL のレスポンス性が悪化
 
-**なぜ `stream: false` なのか** (現時点):
-- ストリーミング対応は Phase 5 で計画
-- 非ストリーミングは実装が簡潔で、ツール呼び出しの結果待ちと親和性が高い
+**なぜリクエストに `stream` フラグを持たせるのか**:
+- Ollama の `/api/chat` は `stream` フラグで非同期 NDJSON 応答を切り替える（§7.1 で実装済み）
+- `chat()` は `stream: false`、`chat_stream()` は `stream: true` を送る
+- 現在の `LLMNode` は `supports_streaming()` が真なら `chat_stream()` を呼び、false の場合は
+  `chat()` にフォールバックする。`OllamaProvider` / `OpenAIProvider` はいずれも true を返す
 
 **内部型の設計**:
 ```rust
@@ -260,7 +281,7 @@ pub async fn run(&mut self, user_input: &str) -> Result<String, AgentError> {
 - `LLMNode` 自体はステートレス（`&self` で process を呼ぶ）
 - 反復回数は `context["iteration"]` として管理し、毎回インクリメント
 
-**なぜ空の tool_call 名をフィルタリングするのか** (`react.rs:45-50`):
+**なぜ空の tool_call 名をフィルタリングするのか** (`react.rs:71-76`):
 - Ollama が空の `function.name` を返すケースが報告されている
 - `ToolNode` で `ToolNotFound` エラーになるのを事前回避
 
@@ -324,10 +345,10 @@ pub async fn execute(&self, tool_call: &ToolCall) -> Result<ToolResult, AgentErr
 | `read_file.rs` | `tokio::fs::read_to_string` | 非同期 I/O。大きなファイルでもブロックしない |
 | `write_file.rs` | `create_dir_all` + `write` | 親ディレクトリを自動作成。エージェントがファイルパスを正確に指定できない場合の救済 |
 | `glob.rs` | `glob` クレート + `spawn_blocking` | `glob` は CPU 密集型。`spawn_blocking` で非同期ランタイムをブロックしない |
-| `grep.rs` | `sh -c "grep -rn"` | 正規表現検索をシェルに委譲。Rust 側で grep を再実装する必然性がない |
+| `grep.rs` | `Command::new("grep").arg("-rn")` | 正規表現検索を外部 `grep` に委譲。Rust 側で grep を再実装する必然性がない。シェルを介さず直接起動するので、引数はそのまま `grep` に渡される |
 | `rag.rs` | `EmbeddingProvider` + `VectorStore` | RAG 検索をツールとして提供。エージェントが `search_docs` を呼び出して知識を取得 |
 
-**なぜ `grep` はシェルに委譲するのか**: Rust の `grep` クレート（ripgrep）は高速だが、パラメータ解析・ファイルフィルタ等の機能が豊富で、ツールとして必要な機能と過剰に適合する。`sh -c "grep -rn"` で十分な機能を提供でき、実装コストが大幅に低い。
+**なぜ `grep` は外部プロセスに委譲するのか**: Rust の `grep` クレート（ripgrep）は高速だが、パラメータ解析・ファイルフィルタ等の機能が豊富で、ツールとして必要な機能と過剰に適合する。`Command::new("grep")` で直接起動すれば十分な機能を提供でき、実装コストが大幅に低い。`sh -c` を経由しないのは、引数をそのまま `grep` に渡して余分なクォート処理を避けるため。
 
 ---
 
@@ -400,18 +421,29 @@ metadata: Utf8 (JSON文字列)
 **チャンク戦略の設計判断**:
 ```rust
 pub fn chunk_text(text: &str, chunk_size: usize) -> Vec<String> {
-    // 512バイトごとにチャンク分割
-    // 改行位置で分割を優先（語彙の途中で切らない）
-    let search_start = end.saturating_sub(50);
-    if let Some(newline_pos) = bytes[search_start..end].iter().rposition(|&b| b == b'\n') {
-        let actual_end = search_start + newline_pos + 1;
-        ...
+    // 512バイトの予算で分割し、直前の50バイトから末尾の改行を探す
+    let mut end = (start + chunk_size).min(text.len());
+    if end < text.len() {
+        let search_start = end.saturating_sub(BREAK_SEARCH_BYTES);
+        if let Some(offset) = text.as_bytes()[search_start..end]
+            .iter().rposition(|&b| b == b'\n')
+        {
+            end = search_start + offset + 1;
+        }
     }
+
+    // バイト境界で切るとマルチバイト文字で panic するため、境界に合わせる
+    end = text.floor_char_boundary(end);
+    ...
 }
 ```
 - **512バイト**: BERT の最大長（512トークン）に合わせ、テキストの意味的なまとまりを維持
 - **改行優先分割**: 言語的な完全性を保つ。50バイトのlook-backで改行を探す
+- **文字境界へのスナップ**: バイト単位の切断は日本語などのマルチバイト文字で `panic` する。
+  `floor_char_boundary` で直前の境界まで戻してから切り出す
 - **BFS によるディレクトリ走査**: `VecDeque` で幅優先。深すぎるネストでもスタックオーバーフローを回避
+- **チャンク単位の重複排除**: ハッシュはチャンクごとに計算するため、ファイル内の反復ヘッダも
+  1 件として扱われる（§7.4）
 
 ---
 
@@ -443,60 +475,23 @@ fn enforce_limit(&mut self) {
 
 ---
 
-## 4. データフロー
+## 4. データフローを形づくる設計判断
 
-### 4.1 ユーザー入力から応答まで
+処理の流れそのもの（ユーザー入力から応答まで、RAG の取り込みと検索）は
+[Architecture §5「Agent Execution Flow」](architecture.md#5-agent-execution-flow) と
+[§6「RAG Pipelines」](architecture.md#6-rag-pipelines) を参照してください。
 
-```
-1. ユーザー入力 "README の内容を教えて"
-2. GraphAgent::run()
-   ├── State.messages = [memory履歴] + [Userメッセージ]
-   ├── GraphRunner::run(state)
-   │   ├── LLMNode::process()
-   │   │   ├── System プロンプトを先頭に挿入
-   │   │   ├── Ollama に chat() 呼び出し
-   │   │   ├── LLM: "read_file ツールを使って README を読む"
-   │   │   ├── state.messages に Assistant (tool_calls) を追加
-   │   │   └── next_node = "tools"
-   │   │
-   │   ├── ToolNode::process()
-   │   │   ├── read_file("README.md") を実行
-   │   │   ├── 結果を Role:Tool メッセージとして追加
-   │   │   └── next_node = "llm"
-   │   │
-   │   ├── LLMNode::process() (2回目)
-   │   │   ├── Ollama に chat() 呼び出し（README 内容を含む）
-   │   │   ├── LLM: "README の内容は以下の通りです..."
-   │   │   ├── state.messages に Assistant (content) を追加
-   │   │   └── next_node = "__end__"
-   │   │
-   │   └── return state
-   │
-   ├── 差分を memory に追加
-   └── 最後の Assistant メッセージを返す
-```
+その流れに込められた判断は、以下に分解して記載しています。
 
-### 4.2 RAG ツール呼び出しフロー
-
-```
-1. ユーザー入力 "プロジェクトのエラーハンドリング方法を教えて"
-2. LLMNode: search_docs ツールを呼び出し
-3. ToolNode:
-   ├── SearchDocsTool::call({ query: "エラーハンドリング方法", top_k: 3 })
-   │   ├── CandleEmbeddingProvider::embed("エラーハンドリング方法")
-   │   │   ├── BERT でトークン化
-   │   │   ├── Forward pass
-   │   │   ├── Mean pooling + L2 正規化
-   │   │   └── Vec<f32> (384次元) を返す
-   │   │
-   │   └── LanceVectorStore::search(vector, 3)
-   │       ├── nearest_to(vector) クエリ
-   │       ├── Arrow RecordBatch から結果を抽出
-   │       └── Vec<SearchResult> を返す
-   │
-   └── 結果を Format して Role:Tool メッセージに追加
-4. LLMNode: 検索結果を元に回答を生成
-```
+| フロー上の性質 | 設計判断の所在 |
+|---------------|---------------|
+| LLM 呼び出しとツール実行が別ノードに分れている | [§3.3.3](#333-llmnode--toolnode--react-ループ-agentgraphnodesreactrs) |
+| 反復回数が 25 で頭打ちになっている | [§3.3.3](#333-llmnode--toolnode--react-ループ-agentgraphnodesreactrs) |
+| ツール結果が並列に実行される | [§7.5](#75-並列ツール実行) |
+| ストリーミング対応プロバイダーでは応答待ちが短い | [§7.1](#71-streaming-レスポンス対応) |
+| チャンク単位の重複排除が入っている | [§7.4](#74-インデックス重複排除) |
+| RAG 初期化失敗でも起動する | [§3.5.1](#351-なぜ-rag-がオプションなのか) |
+| 記憶が直近 20 メッセージに限られる | [§3.6](#36-memory--会話記憶) |
 
 ---
 
@@ -544,11 +539,11 @@ fn enforce_limit(&mut self) {
 
 | 制約 | 現状 | 将来の改善 |
 |------|------|---------|
-| ストリーミング未対応 | `stream: false` で全結果を待つ | WebSocket/SSE によるストリーミング対応 |
-| ツール出力の切り詰め | 10,000文字で切り詰め | LLM のコンテキストウィンドウに応じた動的調整 |
-| インデックスの重複 | 再インデックスで重複エントリが発生 | ハッシュベースの重複排除 |
+| ~~ストリーミング未対応~~ | ✅ 解決（§7.1、`LLMNode` は `chat_stream()` を使用） | WebSocket/SSE によるストリーミング UI 連携（§8） |
+| ツール出力の切り詰め | 10,000**バイト**で切り詰め（文字境界を保持） | LLM のコンテキストウィンドウに応じた動的調整 |
+| ~~インデックスの重複~~ | ✅ 解決（§7.4、ハッシュベース重複排除） | 永続化済みハッシュ集合によるセッション跨ぎの重複排除 |
 | エラー復旧 | RAG 初期化失敗時はツール無効化 | リトライ機構・フォールバック戦略 |
-| 並列ツール実行 | ~~順序通りに実行~~ | `futures::join_all` による並列実行 ✅ |
+| ~~並列ツール実行~~ | ✅ 解決（`futures::join_all`） | ツールごとの並列度制御・タイムアウト |
 
 ---
 
@@ -587,9 +582,17 @@ pub struct StreamingChunk {
 
 **OpenAI の実装**: SSE（Server-Sent Events）形式の `data: {...}` チャンクを処理。`data: [DONE]` でストリーム終了。
 
-**設計判断**: 現時点では `LLMNode` は `chat()` のみを使用。`chat_stream` は将来の UI 連携やリアルタイム表示で使用予定。
+**設計判断**: `LLMNode` は `provider.supports_streaming()` が真なら `chat_stream()` を呼び、`StreamingChunk` を `done: true` まで蓄積してから `LLMResponse` を組み立てる（`graph/nodes/react.rs`）。偽の場合は `chat()` にフォールバックする。`OllamaProvider` と `OpenAIProvider` はいずれも `supports_streaming() == true` を返すため、現状の実リクエスト経路では常にストリーミングが使われる。
+
+チャンクを蓄積してから初めて REPL に返すため、まだユーザーが感じるレイテンシ低減には
+つながっていない。ストリーミングが有効なのはプロバイダー間のリクエスト経路においてのみ。
+次のステップは、蓄積したチャンクを逐次 UI へ流すこと（§8「Streaming UI 連携」）。
 
 ### 7.2 長期記憶 (SummaryMemory)
+
+**統合状況**: ⚠️ `SummaryMemory` 自体は実装済みだが、`GraphAgent` には**未統合**。
+`GraphAgent::new` は現在 `SlidingWindowMemory::new(20)` を無条件に構築する
+（`agent/mod.rs`、`summary.rs` は `#[allow(dead_code)]`）。統合は §8 の課題。
 
 **問題**: `SlidingWindowMemory` は直近 20 メッセージのみ保持。古い会話の重要な文脈（「前に〇〇と言ったね」等）が失われる。
 
@@ -704,63 +707,7 @@ let results_raw = join_all(futures).await;
 
 ---
 
-## 8. ファイル一覧と責務（更新版）
-
-| ファイル | 責務 | 行数 |
-|---------|------|------|
-| `src/main.rs` | Composition Root、CLI、REPL | ~180 |
-| `src/config.rs` | 環境変数からの設定読み込み | ~60 |
-| `src/core/error.rs` | 統一エラーティプ | 63 |
-| `src/core/message.rs` | LLM 通信データモデル | 135 |
-| `src/core/provider.rs` | LLM プロバイダートレイト + StreamingChunk | ~45 |
-| `src/llm/ollama.rs` | Ollama HTTP クライアント + Streaming | ~250 |
-| `src/llm/openai.rs` | OpenAI HTTP クライアント + Streaming | ~280 |
-| `src/agent/mod.rs` | GraphAgent（トップレベルオーケストレーター） | 216 |
-| `src/agent/graph/mod.rs` | GraphRunner + Node トレイト | 52 |
-| `src/agent/graph/state.rs` | 共有可能 Mutable State | 16 |
-| `src/agent/graph/nodes/react.rs` | LLMNode + ToolNode（並列実行対応） | ~150 |
-| `src/tools/mod.rs` | Tool トレイト + ToolEngine レジストリ | 141 |
-| `src/tools/builtin/bash.rs` | シェルコマンド実行 | 123 |
-| `src/tools/builtin/read_file.rs` | ファイル読み込み | 75 |
-| `src/tools/builtin/write_file.rs` | ファイル書き込み | 102 |
-| `src/tools/builtin/glob.rs` | ファイルグロブ検索 | 111 |
-| `src/tools/builtin/grep.rs` | 正規表現コンテンツ検索 | 117 |
-| `src/tools/builtin/rag.rs` | セマンティック文書検索 | 78 |
-| `src/rag/embeddings.rs` | BERT ベースの Embedding | 103 |
-| `src/rag/vector_store.rs` | LanceDB ベクトルストレージ | 202 |
-| `src/rag/indexer.rs` | ドキュメントインデックスパイプライン + 重複排除 | ~200 |
-| `src/memory/sliding.rs` | スライディングウィンドウ会話記憶 | 111 |
-| `src/memory/summary.rs` | LLM ベースの長期記憶 | ~190 |
-
----
-
-## 9. 依存関係図（更新版）
-
-```
-main.rs
-├── config.rs
-├── llm/ollama.rs → core/
-├── llm/openai.rs → core/
-├── agent/mod.rs
-│   ├── agent/graph/mod.rs → core/
-│   ├── agent/graph/state.rs → core/
-│   └── agent/graph/nodes/react.rs → core/, tools/, futures
-├── tools/mod.rs → core/
-│   └── tools/builtin/* → core/
-├── rag/
-│   ├── embeddings.rs → core/
-│   ├── vector_store.rs → core/
-│   └── indexer.rs → rag/embeddings.rs, rag/vector_store.rs
-└── memory/
-    ├── sliding.rs → core/
-    └── summary.rs → core/, LLMProvider
-```
-
-**設計原則**: 依存は上位レイヤーから下位レイヤーへ。`core/` は他のモジュールに依存しない（最下位）。`main.rs` が全てのモジュールを組み立てる（Composition Root パターン）。
-
----
-
-## 10. 今後の改善案
+## 8. 今後の改善案
 
 | 機能 | 状態 | 優先度 | 説明 |
 |------|------|--------|------|

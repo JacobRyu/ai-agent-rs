@@ -2,18 +2,46 @@
 
 All configuration is through environment variables.
 
-## General
+## Provider Selection
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RUST_LOG` | (none) | Tracing/log level: `info`, `debug`, `warn`, `error` |
+| `LLM_PROVIDER` | `ollama` | Which backend to use: `ollama` or `openai`. Any other value falls back to `ollama`. |
+
+`LLM_PROVIDER` is the only way to select the OpenAI backend. Setting `OPENAI_API_KEY`
+alone does not switch providers.
+
+```bash
+# Use Ollama (default)
+LLM_PROVIDER=ollama cargo run
+
+# Use OpenAI
+LLM_PROVIDER=openai OPENAI_API_KEY=sk-... cargo run
+```
+
+If `LLM_PROVIDER=openai` and `OPENAI_API_KEY` is unset, the agent exits at startup with
+`OPENAI_API_KEY must be set when LLM_PROVIDER=openai` (no API calls are made).
 
 ## Ollama
+
+Used when `LLM_PROVIDER=ollama`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `qwen3:8b` | Model name for chat completions |
+
+## OpenAI
+
+Used when `LLM_PROVIDER=openai`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPENAI_API_KEY` | (none, **required**) | API key. Read from the environment only; never passed on the command line. |
+| `OPENAI_MODEL` | `gpt-4o` | Model name for chat completions |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | API base URL. Point this at any OpenAI-compatible endpoint (e.g. a local gateway). |
+
+Both providers support streaming responses, so no extra configuration is needed for that.
 
 ## Vector Store
 
@@ -22,13 +50,29 @@ All configuration is through environment variables.
 | `VECTOR_STORE_URI` | `data/lancedb` | Filesystem path for LanceDB storage |
 | `VECTOR_TABLE_NAME` | `documents` | LanceDB table name for document vectors |
 
+## General
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RUST_LOG` | (none) | Tracing/log level: `info`, `debug`, `warn`, `error` |
+
 ## Example
 
 ```bash
 RUST_LOG=debug \
+  LLM_PROVIDER=ollama \
   OLLAMA_HOST=http://192.168.1.100:11434 \
   OLLAMA_MODEL=llama3:70b \
   VECTOR_STORE_URI=/data/agent/lancedb \
   VECTOR_TABLE_NAME=my_docs \
+  cargo run
+```
+
+```bash
+RUST_LOG=info \
+  LLM_PROVIDER=openai \
+  OPENAI_API_KEY=sk-... \
+  OPENAI_MODEL=gpt-4o \
+  OPENAI_BASE_URL=https://api.openai.com/v1 \
   cargo run
 ```

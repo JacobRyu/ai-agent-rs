@@ -147,24 +147,34 @@ impl Indexer {
     }
 
     pub fn chunk_text(text: &str, chunk_size: usize) -> Vec<String> {
+        const BREAK_SEARCH_BYTES: usize = 50;
+
         let mut chunks = Vec::new();
         let mut start = 0usize;
-        let bytes = text.as_bytes();
-        let len = bytes.len();
+        let len = text.len();
 
         while start < len {
-            let end = (start + chunk_size).min(len);
+            // Preferred break point: the last newline within the trailing
+            // `BREAK_SEARCH_BYTES` of the window, so paragraphs stay intact.
+            let mut end = (start + chunk_size).min(len);
             if end < len {
-                let search_start = end.saturating_sub(50);
-                if let Some(newline_pos) =
-                    bytes[search_start..end].iter().rposition(|&b| b == b'\n')
+                let search_start = end.saturating_sub(BREAK_SEARCH_BYTES);
+                if let Some(offset) =
+                    text.as_bytes()[search_start..end].iter().rposition(|&b| b == b'\n')
                 {
-                    let actual_end = search_start + newline_pos + 1;
-                    chunks.push(text[start..actual_end].to_string());
-                    start = actual_end;
-                    continue;
+                    end = search_start + offset + 1;
                 }
             }
+
+            // `chunk_size` is a byte budget, so snap back to a character boundary.
+            // Without this, slicing a multi-byte document (e.g. Japanese) at a
+            // non-boundary offset panics.
+            end = text.floor_char_boundary(end);
+            if end <= start {
+                // Window landed inside a single character: emit that whole character.
+                end = start + text[start..].chars().next().map_or(0, |c| c.len_utf8());
+            }
+
             chunks.push(text[start..end].to_string());
             start = end;
         }
@@ -214,5 +224,42 @@ mod tests {
         let h1 = Indexer::content_hash("hello");
         let h2 = Indexer::content_hash("world");
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_chunk_text_multibyte_does_not_panic() {
+        // 3 bytes per character, so a 512-byte window ends mid-character.
+        // This panicked before chunk boundaries were made UTF-8 safe.
+        let text = "あ".repeat(2000);
+        let chunks = Indexer::chunk_text(&text, 512);
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().all(|c| !c.is_empty()));
+        assert!(chunks.iter().all(|c| c.chars().all(|ch| ch == 'あ')));
+    }
+
+    #[test]
+    fn test_chunk_text_multibyte_round_trips() {
+        let text = "これは日本語のドキュメントです。\n".repeat(500);
+        let chunks = Indexer::chunk_text(&text, 512);
+        assert_eq!(chunks.concat(), text, "chunking must not lose or corrupt text");
+    }
+
+    #[test]
+    fn test_chunk_text_emoji_and_ascii_mixed() {
+        // 4-byte characters mixed with ASCII: no cut may land mid-character.
+        let text = "abc 🎉 def 🎉 ghi 🎉 ".repeat(400);
+        let chunks = Indexer::chunk_text(&text, 300);
+        assert_eq!(chunks.concat(), text);
+        assert!(chunks.iter().all(|c| c.len() <= 300 || c.chars().count() == 1));
+    }
+
+    #[test]
+    fn test_chunk_text_respects_budget() {
+        // Every chunk fits the byte budget, except one that holds a single
+        // character wider than the budget itself.
+        let text = "a".repeat(5000);
+        let chunks = Indexer::chunk_text(&text, 512);
+        assert!(chunks.len() >= 9);
+        assert!(chunks.iter().all(|c| c.len() <= 512));
     }
 }

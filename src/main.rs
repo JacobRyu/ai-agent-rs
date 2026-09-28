@@ -12,7 +12,7 @@ use tracing::{info, warn};
 
 use crate::agent::GraphAgent;
 use crate::config::Config;
-use crate::core::LLMProvider;
+use crate::core::{AgentError, LLMProvider};
 use crate::llm::ollama::OllamaProvider;
 use crate::llm::openai::OpenAIProvider;
 use crate::rag::{
@@ -32,20 +32,24 @@ fn parse_args() -> Option<String> {
     }
 }
 
-fn create_provider(config: &Config) -> Box<dyn LLMProvider> {
+fn create_provider(config: &Config) -> Result<Box<dyn LLMProvider>, AgentError> {
     match config.llm_provider.as_str() {
         "openai" => {
-            let api_key = config
-                .openai_api_key
-                .as_ref()
-                .expect("OPENAI_API_KEY environment variable is required for OpenAI provider");
-            Box::new(OpenAIProvider::with_base_url(
+            let api_key = config.openai_api_key.as_ref().ok_or_else(|| {
+                AgentError::LLMError(
+                    "OPENAI_API_KEY must be set when LLM_PROVIDER=openai".to_string(),
+                )
+            })?;
+            Ok(Box::new(OpenAIProvider::with_base_url(
                 api_key.clone(),
                 config.openai_model.clone(),
                 config.openai_base_url.clone(),
-            ))
+            )))
         }
-        _ => Box::new(OllamaProvider::new(config.ollama_host.clone(), config.ollama_model.clone())),
+        _ => Ok(Box::new(OllamaProvider::new(
+            config.ollama_host.clone(),
+            config.ollama_model.clone(),
+        ))),
     }
 }
 
@@ -89,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return run_index(path, embedding_provider, vector_store).await;
     }
 
-    let provider = create_provider(&config);
+    let provider = create_provider(&config)?;
 
     let mut tool_engine = ToolEngine::new();
     tool_engine.register(Arc::new(ReadFileTool));

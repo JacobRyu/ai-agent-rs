@@ -8,9 +8,29 @@
 #[async_trait]
 pub trait LLMProvider: Send + Sync {
     async fn chat(&self, messages: &[Message], tools: &[ToolDef]) -> Result<LLMResponse, AgentError>;
+
+    async fn chat_stream<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [ToolDef],
+    ) -> Result<BoxStream<'a, Result<StreamingChunk, AgentError>>, AgentError>;
+
     fn model_name(&self) -> &str;
+
+    fn supports_streaming(&self) -> bool;
+}
+
+pub struct StreamingChunk {
+    pub content: Option<String>,
+    pub tool_calls: Option<Vec<ToolCall>>,
+    pub done: bool,
 }
 ```
+
+`LLMNode` calls `chat_stream()` when `supports_streaming()` returns `true`, otherwise
+`chat()`. Both bundled providers (`OllamaProvider`, `OpenAIProvider`) return `true`.
+`chat_stream` and `supports_streaming` have default implementations, so a new provider only
+needs `chat` and `model_name` to be usable.
 
 ### `Tool`
 
@@ -110,10 +130,19 @@ pub struct State {
 ```rust
 impl Indexer {
     pub fn new(embedding_provider: Arc<dyn EmbeddingProvider>, vector_store: Arc<dyn VectorStore>) -> Self;
-    pub async fn index_directory(&self, dir_path: &str) -> Result<usize, AgentError>;
+    pub async fn index_directory(&mut self, dir_path: &str) -> Result<usize, AgentError>;
+    pub fn skipped_duplicates(&self) -> usize;
     pub fn chunk_text(text: &str, chunk_size: usize) -> Vec<String>;
 }
 ```
+
+`index_directory` takes `&mut self` because it accumulates the set of seen content hashes
+across a run. It returns the number of chunks indexed; call `skipped_duplicates()`
+separately for the deduplication count.
+
+`chunk_text` treats `chunk_size` as a **byte** budget and snaps to a character boundary, so
+multi-byte text is never split mid-character. It prefers to break on a newline within the
+last 50 bytes of each window.
 
 ## Error Types
 

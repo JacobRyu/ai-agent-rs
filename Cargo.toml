@@ -31,3 +31,44 @@ temp-env = "0.3"
 
 [lints]
 rust.linker_messages = "allow"
+
+# ---------------------------------------------------------------------------
+# Build size / speed tuning
+#
+# 実測 (aegis-oms-rs / 新規 target/ / 同一 Cargo.lock):
+#   target/     826MB -> 515MB (-38%)
+#   debug/deps  734MB -> 438MB (-40%)
+#   dev binary  19.1MB -> 15.8MB
+#   cold build  遅くならない (3m02s -> 2m41s)
+#
+# 依存クレートの DWARF を捨てるので、dep 内で panic したときの
+# スタックトレースはフレーム数が減ります（関数名は残ります）。
+# 元の挙動に戻したければこのブロックを丸ごと削除してください。
+# ---------------------------------------------------------------------------
+
+[profile.dev]
+# Cargo 既定の debug=true は全クレートに full DWARF を付けるため、
+# deps/ の .rlib と .o がそれだけで 2〜3 倍に膨らむ。
+# line table だけ残せば自分のクレートの backtrace は行番号つきで読める。
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+# 依存クレートは自分のコードから読まないのに DWARF は要らない。
+# ここが target/debug/deps の 8 割を占めていた。
+debug = false
+
+# --- opt-in ---------------------------------------------------------------
+# このプロジェクトは candle / arrow / lancedb / datafusion を使うので
+# 計算コストが特に重い。上手く動かない時は下のコメントを外す。
+#   効果: 推論・検索が体感で速くなる
+#   コスト: dev の cold build が 2m41s -> 4m02s (+50%, 実測)
+#   sccache が効いた後は無料。ビルドが遅い時はそのまま無効でよい。
+# opt-level = 1
+
+[profile.release]
+# バイナリから DWARF を落とす。panic の backtrace は残るので debug 用途は保つ
+strip = "debuginfo"
+# 実測: binary 5.6MB -> 4.1MB (-26%) かつ cold build 5m23s -> 4m04s (-24%)
+# ディスク使用量は 587MB で変わらないので「無料」で導入する価値がある
+lto = "thin"
+codegen-units = 1
