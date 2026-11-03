@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::future::join_all;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::agent::graph::{Node, State};
@@ -8,13 +9,13 @@ use crate::core::{AgentError, LLMProvider, LLMResponse, Message, Role, ToolCall}
 use crate::tools::ToolEngine;
 
 pub struct LLMNode {
-    provider: Box<dyn LLMProvider>,
+    provider: Arc<dyn LLMProvider>,
     tools: ToolEngine,
     system_prompt: String,
 }
 
 impl LLMNode {
-    pub fn new(provider: Box<dyn LLMProvider>, tools: ToolEngine, system_prompt: String) -> Self {
+    pub fn new(provider: Arc<dyn LLMProvider>, tools: ToolEngine, system_prompt: String) -> Self {
         Self { provider, tools, system_prompt }
     }
 }

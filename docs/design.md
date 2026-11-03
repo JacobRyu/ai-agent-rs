@@ -449,6 +449,10 @@ pub fn chunk_text(text: &str, chunk_size: usize) -> Vec<String> {
 
 ### 3.6 `memory/` — 会話記憶
 
+`GraphAgent` は `ConversationMemory` トレイト（`memory/mod.rs`）にのみ依存し、
+`Box<dyn ConversationMemory>` として注入される。既定は `SlidingWindowMemory` で、
+`MEMORY_STRATEGY=summary` を指定すると `SummaryMemory` に切り替わる（→ §7.2）。
+
 #### `SlidingWindowMemory` (`memory/sliding.rs`)
 
 **なぜスライディングウィンドウなのか**:
@@ -491,20 +495,20 @@ fn enforce_limit(&mut self) {
 | ストリーミング対応プロバイダーでは応答待ちが短い | [§7.1](#71-streaming-レスポンス対応) |
 | チャンク単位の重複排除が入っている | [§7.4](#74-インデックス重複排除) |
 | RAG 初期化失敗でも起動する | [§3.5.1](#351-なぜ-rag-がオプションなのか) |
-| 記憶が直近 20 メッセージに限られる | [§3.6](#36-memory--会話記憶) |
+| 記憶戦略を実行時に差し替えられる | [§3.6](#36-memory--会話記憶) |
 
 ---
 
 ## 5. なぜその設計判断をとったのか — トレードオフ
 
-### 5.1 `Box<dyn LLMProvider>` vs `impl LLMProvider`
+### 5.1 `Arc<dyn LLMProvider>` vs `impl LLMProvider`
 
 | 手法 | 利点 | 欠点 |
 |-----|------|------|
-| `Box<dyn LLMProvider>` (採用) | ランタイムでプロバイダーを切り替え可能 | vtable オーバーヘッド（実質無視） |
+| `Arc<dyn LLMProvider>` (採用) | ランタイムでプロバイダーを切り替え可能。`LLMNode` と `SummaryMemory` で共有できる | vtable オーバーヘッド（実質無視） |
 | `impl LLMProvider` (ジェネリクス) | 静的ディスパッチで高速 | 型が伝播し、`GraphAgent` の型定義が複雑化 |
 
-**採用理由**: エージェントのパフォーマンスボトルネックは LLM の推論（数百ms〜数秒）。vtable のオーバーフォーヘッド（数ns）は無視できる。
+**採用理由**: エージェントのパフォーマンスボトルネックは LLM の推論（数百ms〜数秒）。vtable のオーバーフォーヘッド（数ns）は無視できる。さらに `SummaryMemory` が要約生成に同じプロバイダーを使うため、`Arc` による共有が必要。
 
 ### 5.2 `Arc<dyn Tool>` vs `Box<dyn Tool>`
 
@@ -519,10 +523,12 @@ fn enforce_limit(&mut self) {
 
 | 手法 | 利点 | 欠点 |
 |-----|------|------|
-| スライディングウィンドウ (採用) | 実装が簡潔・予測可能 | 古い文脈が失われる |
-| サマリー化メモリ | 長期記憶を保持 | LLM にサマリー生成を依頼する必要がある |
+| スライディングウィンドウ (既定) | 実装が簡潔・予測可能・追加 LLM 呼び出しなし | 古い文脈が失われる |
+| サマリー化メモリ (opt-in) | 長期記憶を保持 | 上限超過時に LLM 呼び出しが発生する |
 
-**採用理由**: Phase 1 ではシンプルさを優先。サマリー化は Phase 4（長期記憶）で計画。
+**採用理由**: 既定は予測可能性とレイテンシを優先し、長期文脈が必要な場合だけ
+`MEMORY_STRATEGY=summary` で切り替える。`SummaryMemory` は上限超過時に古い半分を要約し、
+要約呼び出しが失敗した場合は通常の切り捨てにフォールバックする（可用性優先）。
 
 ### 5.4 `LanceVectorStore` の再接続 vs 接続プーリング
 
@@ -590,9 +596,10 @@ pub struct StreamingChunk {
 
 ### 7.2 長期記憶 (SummaryMemory)
 
-**統合状況**: ⚠️ `SummaryMemory` 自体は実装済みだが、`GraphAgent` には**未統合**。
-`GraphAgent::new` は現在 `SlidingWindowMemory::new(20)` を無条件に構築する
-（`agent/mod.rs`、`summary.rs` は `#[allow(dead_code)]`）。統合は §8 の課題。
+**統合状況**: ✅ `GraphAgent` は `ConversationMemory` トレイト越しに記憶を受け取る。
+`main.rs` が `MEMORY_STRATEGY` に応じて `SlidingWindowMemory`（既定）か
+`SummaryMemory` を構築して注入する（`agent/mod.rs`）。要約生成には推論と同じ
+`Arc<dyn LLMProvider>` を共有する。
 
 **問題**: `SlidingWindowMemory` は直近 20 メッセージのみ保持。古い会話の重要な文脈（「前に〇〇と言ったね」等）が失われる。
 
@@ -712,7 +719,7 @@ let results_raw = join_all(futures).await;
 | 機能 | 状態 | 優先度 | 説明 |
 |------|------|--------|------|
 | Streaming UI 連携 | 準備完了 | 高 | `chat_stream` を使用したリアルタイム表示 |
-| SummaryMemory の `main.rs` 統合 | 準備完了 | 高 | 環境変数で `sliding` / `summary` を切り替え |
+| SummaryMemory の統合 | ✅ 完了 | — | `MEMORY_STRATEGY` で `sliding` / `summary` を切り替え |
 | Web UI + Persistence | 未着手 | 中 | WebSocket ベースの対話 UI |
 | セッション永続化 | 未着手 | 中 | SQLite への会話履歴保存 |
 | エージェント間協調 | 未着手 | 低 | 複数エージェントの並列実行 |

@@ -43,6 +43,22 @@ Used when `LLM_PROVIDER=openai`.
 
 Both providers support streaming responses, so no extra configuration is needed for that.
 
+## Conversation Memory
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMORY_STRATEGY` | `sliding` | `sliding` keeps the last N messages; `summary` summarises older messages with the LLM. Unknown values fall back to `sliding` with a warning. |
+| `MEMORY_MAX_MESSAGES` | `20` | Maximum messages kept before eviction (or summarisation). |
+| `MEMORY_SUMMARY_THRESHOLD` | `12` | Message count above which `summary` starts summarising. If it is greater than or equal to `MEMORY_MAX_MESSAGES`, eviction runs instead. |
+
+`summary` issues one extra LLM request when the window overflows, using the same provider
+as inference. If that request fails, it falls back to plain eviction. Invalid numeric
+values fall back to the defaults.
+
+```bash
+MEMORY_STRATEGY=summary MEMORY_MAX_MESSAGES=30 MEMORY_SUMMARY_THRESHOLD=10 cargo run
+```
+
 ## Vector Store
 
 | Variable | Default | Description |
@@ -65,6 +81,9 @@ RUST_LOG=debug \
   OLLAMA_MODEL=llama3:70b \
   VECTOR_STORE_URI=/data/agent/lancedb \
   VECTOR_TABLE_NAME=my_docs \
+  MEMORY_STRATEGY=summary \
+  MEMORY_MAX_MESSAGES=30 \
+  MEMORY_SUMMARY_THRESHOLD=10 \
   cargo run
 ```
 

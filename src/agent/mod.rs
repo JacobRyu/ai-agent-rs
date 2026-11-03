@@ -5,17 +5,22 @@ use self::graph::{
     nodes::{LLMNode, ToolNode},
 };
 use crate::core::{AgentError, LLMProvider, Message, Role};
-use crate::memory::SlidingWindowMemory;
+use crate::memory::ConversationMemory;
 use crate::tools::ToolEngine;
 use std::sync::Arc;
 
 pub struct GraphAgent {
     runner: GraphRunner,
-    memory: SlidingWindowMemory,
+    memory: Box<dyn ConversationMemory>,
 }
 
 impl GraphAgent {
-    pub fn new(provider: Box<dyn LLMProvider>, tools: ToolEngine, system_prompt: String) -> Self {
+    pub fn new(
+        provider: Arc<dyn LLMProvider>,
+        tools: ToolEngine,
+        system_prompt: String,
+        memory: Box<dyn ConversationMemory>,
+    ) -> Self {
         let mut runner = GraphRunner::new("llm");
 
         let llm_node = Arc::new(LLMNode::new(provider, tools.clone(), system_prompt));
@@ -24,7 +29,7 @@ impl GraphAgent {
         runner.add_node("llm", llm_node);
         runner.add_node("tools", tool_node);
 
-        Self { runner, memory: SlidingWindowMemory::new(20) }
+        Self { runner, memory }
     }
 
     pub async fn run(&mut self, user_input: &str) -> Result<String, AgentError> {
@@ -40,8 +45,10 @@ impl GraphAgent {
         let final_state = self.runner.run(state).await?;
 
         let history_len = self.memory.get_history().len();
-        for msg in final_state.messages.iter().skip(history_len) {
-            self.memory.add(msg.clone());
+        let new_messages: Vec<Message> =
+            final_state.messages.iter().skip(history_len).cloned().collect();
+        for msg in new_messages {
+            self.memory.add(msg).await;
         }
 
         let last_response =
@@ -55,10 +62,15 @@ impl GraphAgent {
 mod tests {
     use super::*;
     use crate::core::{LLMResponse, ToolCall, ToolCallFunction, ToolDef};
+    use crate::memory::{SlidingWindowMemory, SummaryMemory};
     use crate::tools::builtin::BashTool;
     use async_trait::async_trait;
 
     struct MockProvider;
+
+    fn sliding_memory() -> Box<dyn ConversationMemory> {
+        Box::new(SlidingWindowMemory::new(20))
+    }
 
     #[async_trait]
     impl LLMProvider for MockProvider {
@@ -110,9 +122,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_direct_response() {
-        let provider = Box::new(MockProvider);
+        let provider = Arc::new(MockProvider);
         let tools = ToolEngine::new();
-        let mut agent = GraphAgent::new(provider, tools, "prompt".into());
+        let mut agent = GraphAgent::new(provider, tools, "prompt".into(), sliding_memory());
 
         let result = agent.run("hello").await.unwrap();
         assert_eq!(result, "mock response");
@@ -121,10 +133,10 @@ mod tests {
     #[tokio::test]
     async fn test_tool_execution_then_response() {
         let provider =
-            Box::new(MockChainProvider { call_count: std::sync::atomic::AtomicUsize::new(0) });
+            Arc::new(MockChainProvider { call_count: std::sync::atomic::AtomicUsize::new(0) });
         let mut tools = ToolEngine::new();
         tools.register(Arc::new(BashTool));
-        let mut agent = GraphAgent::new(provider, tools, "prompt".into());
+        let mut agent = GraphAgent::new(provider, tools, "prompt".into(), sliding_memory());
 
         let result = agent.run("run a command").await.unwrap();
         assert_eq!(result, "final answer");
@@ -133,10 +145,10 @@ mod tests {
     #[tokio::test]
     async fn test_context_is_populated_during_run() {
         let provider =
-            Box::new(MockChainProvider { call_count: std::sync::atomic::AtomicUsize::new(0) });
+            Arc::new(MockChainProvider { call_count: std::sync::atomic::AtomicUsize::new(0) });
         let mut tools = ToolEngine::new();
         tools.register(Arc::new(BashTool));
-        let mut agent = GraphAgent::new(provider, tools, "prompt".into());
+        let mut agent = GraphAgent::new(provider, tools, "prompt".into(), sliding_memory());
 
         agent.run("run a command").await.unwrap();
 
@@ -170,10 +182,10 @@ mod tests {
             }
         }
 
-        let provider = Box::new(LoopProvider);
+        let provider = Arc::new(LoopProvider);
         let mut tools = ToolEngine::new();
         tools.register(Arc::new(BashTool));
-        let mut agent = GraphAgent::new(provider, tools, "prompt".into());
+        let mut agent = GraphAgent::new(provider, tools, "prompt".into(), sliding_memory());
 
         let result = agent.run("loop").await;
         assert!(result.is_err());
@@ -206,11 +218,26 @@ mod tests {
             }
         }
 
-        let provider = Box::new(EmptyNameProvider);
+        let provider = Arc::new(EmptyNameProvider);
         let tools = ToolEngine::new();
-        let mut agent = GraphAgent::new(provider, tools, "prompt".into());
+        let mut agent = GraphAgent::new(provider, tools, "prompt".into(), sliding_memory());
 
         let result = agent.run("test").await.unwrap();
         assert_eq!(result, "fallback response");
+    }
+
+    #[tokio::test]
+    async fn test_summary_memory_retains_summary_across_turns() {
+        let provider = Arc::new(MockProvider);
+        let memory = Box::new(SummaryMemory::new(4, 2, provider.clone()));
+        let mut agent = GraphAgent::new(provider, ToolEngine::new(), "prompt".into(), memory);
+
+        for i in 0..6 {
+            agent.run(&format!("question {}", i)).await.unwrap();
+        }
+
+        let history = agent.memory.get_history();
+        assert_eq!(history[0].role, Role::System);
+        assert!(history[0].content.starts_with("Previous conversation summary:"));
     }
 }

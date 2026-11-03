@@ -79,7 +79,12 @@ pub trait VectorStore: Send + Sync {
 
 ```rust
 impl GraphAgent {
-    pub fn new(provider: Box<dyn LLMProvider>, tools: ToolEngine, system_prompt: String) -> Self;
+    pub fn new(
+        provider: Arc<dyn LLMProvider>,
+        tools: ToolEngine,
+        system_prompt: String,
+        memory: Box<dyn ConversationMemory>,
+    ) -> Self;
     pub async fn run(&mut self, user_input: &str) -> Result<String, AgentError>;
 }
 ```
@@ -105,6 +110,18 @@ impl ToolEngine {
 }
 ```
 
+### `ConversationMemory`
+
+```rust
+#[async_trait]
+pub trait ConversationMemory: Send {
+    async fn add(&mut self, message: Message);
+    fn get_history(&self) -> Vec<Message>;
+}
+```
+
+`GraphAgent` depends only on this trait. Both implementations below satisfy it.
+
 ### `SlidingWindowMemory`
 
 ```rust
@@ -114,6 +131,25 @@ impl SlidingWindowMemory {
     pub fn get_history(&self) -> Vec<Message>;
 }
 ```
+
+Default strategy (`MEMORY_STRATEGY=sliding`).
+
+### `SummaryMemory`
+
+```rust
+impl SummaryMemory {
+    pub fn new(
+        max_messages: usize,
+        summary_threshold: usize,
+        provider: Arc<dyn LLMProvider>,
+    ) -> Self;
+    pub async fn add(&mut self, message: Message);
+    pub fn get_history(&self) -> Vec<Message>;
+}
+```
+
+Opt-in strategy (`MEMORY_STRATEGY=summary`). Once the window overflows, the older half is
+summarised by the same provider and prepended to history as a `System` message.
 
 ### `State`
 

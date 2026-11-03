@@ -59,15 +59,15 @@ Add a branch to `create_provider()` in `src/main.rs`, and the matching env vars 
 `Config` in `src/config.rs`:
 
 ```rust
-fn create_provider(config: &Config) -> Result<Box<dyn LLMProvider>, AgentError> {
+fn create_provider(config: &Config) -> Result<Arc<dyn LLMProvider>, AgentError> {
     match config.llm_provider.as_str() {
         "openai" => {
             let api_key = config.openai_api_key.as_ref().ok_or_else(|| {
                 AgentError::LLMError("OPENAI_API_KEY must be set".to_string())
             })?;
-            Ok(Box::new(OpenAIProvider::new(api_key.clone(), config.openai_model.clone())))
+            Ok(Arc::new(OpenAIProvider::new(api_key.clone(), config.openai_model.clone())))
         }
-        _ => Ok(Box::new(OllamaProvider::new(config.ollama_host.clone(), config.ollama_model.clone()))),
+        _ => Ok(Arc::new(OllamaProvider::new(config.ollama_host.clone(), config.ollama_model.clone()))),
     }
 }
 ```

@@ -51,7 +51,7 @@ owns the reasoning; the reference directory owns the exhaustive tables.
 
 - **Source Layout**: `src/` with `core/`, `llm/`, `agent/`, `tools/`, `rag/`, `memory/`
 - **Entry Point**: `src/main.rs`
-- **Tests**: `cargo test` (62 tests, no external services required)
+- **Tests**: `cargo test` (67 tests, no external services required)
 - **CI**: GitHub Actions — fmt, check, clippy, nextest (on `main` and `develop`)
 
 ## Status
@@ -71,4 +71,4 @@ owns the reasoning; the reference directory owns the exhaustive tables.
 | 5 | Web UI + persistence | ❌ Planned |
 | 3 (roadmap) | Streaming UI integration | ❌ Planned |
 | 3 (roadmap) | Anthropic provider | ❌ Planned |
-| — | Long-term memory (`SummaryMemory`) | 🚧 Implemented, not wired into `GraphAgent` |
+| — | Long-term memory (`SummaryMemory`) | ✅ Complete (`MEMORY_STRATEGY=summary`) |

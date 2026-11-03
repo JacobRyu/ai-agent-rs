@@ -1,16 +1,17 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use tracing::debug;
 
 use crate::core::{LLMProvider, Message, Role};
+use crate::memory::ConversationMemory;
 
 /// LLM-based conversation memory: summarizes old messages once the window
 /// fills, retaining key context as a synthetic System message.
 ///
-/// Not yet wired into `GraphAgent` (which uses `SlidingWindowMemory`); kept as
-/// a ready-to-integrate strategy. Remove this attribute when integrating.
-#[allow(dead_code)]
+/// Selected at startup with `MEMORY_STRATEGY=summary`; `SlidingWindowMemory` is
+/// the default.
 pub struct SummaryMemory {
     messages: VecDeque<Message>,
     max_messages: usize,
@@ -19,7 +20,6 @@ pub struct SummaryMemory {
     summary: Option<String>,
 }
 
-#[allow(dead_code)]
 impl SummaryMemory {
     pub fn new(
         max_messages: usize,
@@ -50,10 +50,6 @@ impl SummaryMemory {
         result
     }
 
-    pub fn summary(&self) -> Option<&str> {
-        self.summary.as_deref()
-    }
-
     async fn enforce_limit(&mut self) {
         while self.messages.len() > self.max_messages {
             if self.messages.len() > self.summary_threshold {
@@ -76,8 +72,11 @@ impl SummaryMemory {
     }
 
     async fn summarize_old_messages(&mut self) {
+        // Summarize at least one message so `enforce_limit` always makes progress,
+        // even when `max_messages` is 1 (or 0) and the window holds a single message.
+        let split = (self.messages.len() / 2).max(1);
         let messages_to_summarize: Vec<Message> =
-            self.messages.iter().take(self.messages.len() / 2).cloned().collect();
+            self.messages.iter().take(split).cloned().collect();
 
         if messages_to_summarize.is_empty() {
             return;
@@ -118,24 +117,34 @@ impl SummaryMemory {
                     };
                     self.summary = Some(combined);
 
-                    let keep_count = self.messages.len() / 2;
                     let total = self.messages.len();
-                    for _ in 0..(total - keep_count) {
+                    for _ in 0..split {
                         self.messages.pop_front();
                     }
 
-                    debug!("Summarized {} messages, keeping {}", total - keep_count, keep_count);
+                    debug!("Summarized {} messages, keeping {}", split, total - split);
                 }
             }
             Err(e) => {
                 debug!("Failed to summarize messages: {}, falling back to eviction", e);
-                let keep_count = self.messages.len() / 2;
                 let total = self.messages.len();
-                for _ in 0..(total - keep_count) {
+                for _ in 0..split {
                     self.messages.pop_front();
                 }
+                debug!("Evicted {} messages after summarization failure", split.min(total));
             }
         }
+    }
+}
+
+#[async_trait]
+impl ConversationMemory for SummaryMemory {
+    async fn add(&mut self, message: Message) {
+        SummaryMemory::add(self, message).await;
+    }
+
+    fn get_history(&self) -> Vec<Message> {
+        SummaryMemory::get_history(self)
     }
 }
 
@@ -180,7 +189,7 @@ mod tests {
 
         let history = mem.get_history();
         assert_eq!(history.len(), 2);
-        assert!(mem.summary().is_none());
+        assert!(history.iter().all(|m| !matches!(m.role, Role::System)));
     }
 
     #[tokio::test]
@@ -196,7 +205,20 @@ mod tests {
 
         let history = mem.get_history();
         assert!(!history.is_empty());
-        assert!(mem.summary().is_some());
-        assert!(mem.summary().unwrap().contains("Summary"));
+        assert_eq!(history[0].role, Role::System);
+        assert!(history[0].content.contains("Summary"));
+    }
+
+    #[tokio::test]
+    async fn test_zero_limits_still_make_progress() {
+        let provider =
+            Arc::new(MockSummaryProvider { call_count: std::sync::atomic::AtomicUsize::new(0) });
+        let mut mem = SummaryMemory::new(0, 0, provider);
+
+        mem.add(msg(Role::User, "only message")).await;
+
+        let history = mem.get_history();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].role, Role::System);
     }
 }

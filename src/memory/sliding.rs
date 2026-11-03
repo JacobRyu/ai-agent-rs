@@ -1,6 +1,9 @@
 use std::collections::VecDeque;
 
+use async_trait::async_trait;
+
 use crate::core::{Message, Role};
+use crate::memory::ConversationMemory;
 
 pub struct SlidingWindowMemory {
     messages: VecDeque<Message>,
@@ -35,6 +38,17 @@ impl SlidingWindowMemory {
                 break;
             }
         }
+    }
+}
+
+#[async_trait]
+impl ConversationMemory for SlidingWindowMemory {
+    async fn add(&mut self, message: Message) {
+        SlidingWindowMemory::add(self, message);
+    }
+
+    fn get_history(&self) -> Vec<Message> {
+        SlidingWindowMemory::get_history(self)
     }
 }
 

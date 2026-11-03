@@ -15,6 +15,7 @@ use crate::config::Config;
 use crate::core::{AgentError, LLMProvider};
 use crate::llm::ollama::OllamaProvider;
 use crate::llm::openai::OpenAIProvider;
+use crate::memory::{ConversationMemory, SlidingWindowMemory, SummaryMemory};
 use crate::rag::{
     CandleEmbeddingProvider, EmbeddingProvider, Indexer, LanceVectorStore, VectorStore,
 };
@@ -32,7 +33,7 @@ fn parse_args() -> Option<String> {
     }
 }
 
-fn create_provider(config: &Config) -> Result<Box<dyn LLMProvider>, AgentError> {
+fn create_provider(config: &Config) -> Result<Arc<dyn LLMProvider>, AgentError> {
     match config.llm_provider.as_str() {
         "openai" => {
             let api_key = config.openai_api_key.as_ref().ok_or_else(|| {
@@ -40,16 +41,37 @@ fn create_provider(config: &Config) -> Result<Box<dyn LLMProvider>, AgentError> 
                     "OPENAI_API_KEY must be set when LLM_PROVIDER=openai".to_string(),
                 )
             })?;
-            Ok(Box::new(OpenAIProvider::with_base_url(
+            Ok(Arc::new(OpenAIProvider::with_base_url(
                 api_key.clone(),
                 config.openai_model.clone(),
                 config.openai_base_url.clone(),
             )))
         }
-        _ => Ok(Box::new(OllamaProvider::new(
+        _ => Ok(Arc::new(OllamaProvider::new(
             config.ollama_host.clone(),
             config.ollama_model.clone(),
         ))),
+    }
+}
+
+fn create_memory(config: &Config, provider: Arc<dyn LLMProvider>) -> Box<dyn ConversationMemory> {
+    match config.memory_strategy.as_str() {
+        "summary" => {
+            info!(
+                "Using SummaryMemory (max {} messages, summarize above {})",
+                config.memory_max_messages, config.memory_summary_threshold
+            );
+            Box::new(SummaryMemory::new(
+                config.memory_max_messages,
+                config.memory_summary_threshold,
+                provider,
+            ))
+        }
+        "sliding" => Box::new(SlidingWindowMemory::new(config.memory_max_messages)),
+        other => {
+            warn!("Unknown MEMORY_STRATEGY '{}'; falling back to sliding", other);
+            Box::new(SlidingWindowMemory::new(config.memory_max_messages))
+        }
     }
 }
 
@@ -94,6 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let provider = create_provider(&config)?;
+    let memory = create_memory(&config, provider.clone());
 
     let mut tool_engine = ToolEngine::new();
     tool_engine.register(Arc::new(ReadFileTool));
@@ -130,7 +153,7 @@ If you can answer without tools, just respond directly."#
     );
     println!("AI Agent (Provider: {}, Model: {})", config.llm_provider, provider.model_name());
 
-    let mut agent = GraphAgent::new(provider, tool_engine, system_prompt);
+    let mut agent = GraphAgent::new(provider, tool_engine, system_prompt, memory);
     println!("Type 'exit' to quit");
     println!("{}", "-".repeat(40));
 

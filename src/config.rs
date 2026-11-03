@@ -7,6 +7,13 @@ pub struct Config {
     pub openai_model: String,
     pub openai_base_url: String,
     pub llm_provider: String,
+    pub memory_strategy: String,
+    pub memory_max_messages: usize,
+    pub memory_summary_threshold: usize,
+}
+
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 impl Config {
@@ -24,6 +31,10 @@ impl Config {
             openai_base_url: std::env::var("OPENAI_BASE_URL")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
             llm_provider: std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "ollama".to_string()),
+            memory_strategy: std::env::var("MEMORY_STRATEGY")
+                .unwrap_or_else(|_| "sliding".to_string()),
+            memory_max_messages: env_usize("MEMORY_MAX_MESSAGES", 20),
+            memory_summary_threshold: env_usize("MEMORY_SUMMARY_THRESHOLD", 12),
         }
     }
 }
@@ -52,6 +63,44 @@ mod tests {
         temp_env::with_var("OLLAMA_MODEL", Some("llama3:latest"), || {
             let config = Config::from_env();
             assert_eq!(config.ollama_model, "llama3:latest");
+        });
+    }
+
+    #[test]
+    fn test_memory_defaults() {
+        temp_env::with_vars_unset(
+            ["MEMORY_STRATEGY", "MEMORY_MAX_MESSAGES", "MEMORY_SUMMARY_THRESHOLD"],
+            || {
+                let config = Config::from_env();
+                assert_eq!(config.memory_strategy, "sliding");
+                assert_eq!(config.memory_max_messages, 20);
+                assert_eq!(config.memory_summary_threshold, 12);
+            },
+        );
+    }
+
+    #[test]
+    fn test_memory_custom_values() {
+        temp_env::with_vars(
+            [
+                ("MEMORY_STRATEGY", Some("summary")),
+                ("MEMORY_MAX_MESSAGES", Some("30")),
+                ("MEMORY_SUMMARY_THRESHOLD", Some("10")),
+            ],
+            || {
+                let config = Config::from_env();
+                assert_eq!(config.memory_strategy, "summary");
+                assert_eq!(config.memory_max_messages, 30);
+                assert_eq!(config.memory_summary_threshold, 10);
+            },
+        );
+    }
+
+    #[test]
+    fn test_invalid_memory_number_falls_back_to_default() {
+        temp_env::with_var("MEMORY_MAX_MESSAGES", Some("not-a-number"), || {
+            let config = Config::from_env();
+            assert_eq!(config.memory_max_messages, 20);
         });
     }
 }

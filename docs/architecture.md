@@ -1,8 +1,8 @@
 # Architecture
 
 This document describes **what the system is and how it behaves** — module layout, control flow,
-and data flow. The reasoning *behind* those choices (why a graph orchestrator, why `Box<dyn
-Trait>`, which alternatives were rejected) lives in [Design Notes](design.md).
+and data flow. The reasoning *behind* those choices (why a graph orchestrator, why `dyn` Trait
+objects, which alternatives were rejected) lives in [Design Notes](design.md).
 
 Diagrams are written in Mermaid and render natively on GitHub. Each section carries a bilingual
 caption; node labels stay in English so they match the code identifiers they refer to.
@@ -26,7 +26,7 @@ flowchart TD
         GR["GraphRunner<br/>node registry"]
         LLMN["LLMNode"]
         TN["ToolNode"]
-        Mem["SlidingWindowMemory<br/>20-message window"]
+        Mem["ConversationMemory<br/>sliding or summary strategy"]
         GA --- GR
         GR --> LLMN
         GR --> TN
@@ -102,6 +102,7 @@ flowchart TD
     Main --> Llm
     Main --> Tools
     Main --> Rag
+    Main --> Mem
     Main --> CfgFile
     Main -.->|"re-exported types"| Core
 
@@ -124,9 +125,10 @@ Dependency rules, verified against every `use crate::` in `src/`:
 |------|----------|
 | `core/` imports no other module | `core/provider.rs` is the only file with a `crate::` path, and it points at its own siblings |
 | Feature modules never import each other except through declared seams | `agent → tools` (tool execution), `rag → tools` is the reverse (`tools/builtin/rag.rs → rag`), `agent → memory` |
-| `main.rs` is the only module that touches all of them | `main.rs` declares `agent`, `config`, `core`, `llm`, `rag`, `tools` |
+| `main.rs` is the only module that touches all of them | `main.rs` declares `agent`, `config`, `core`, `llm`, `memory`, `rag`, `tools` |
 
-`main.rs` never imports `memory` directly — memory is reached only through `GraphAgent`.
+`main.rs` selects the memory strategy (`MEMORY_STRATEGY`) and injects it into `GraphAgent`.
+The agent depends only on the `ConversationMemory` trait, not on either concrete implementation.
 
 ## 3. Module Layout
 
@@ -182,8 +184,9 @@ provider means implementing `LLMProvider` and registering it in `create_provider
 
 | File | Purpose |
 |------|---------|
+| `mod.rs` | `ConversationMemory` trait — the seam `GraphAgent` depends on |
 | `sliding.rs` | `SlidingWindowMemory` — `VecDeque<Message>` with max limit, preserves `System` messages |
-| `summary.rs` | `SummaryMemory` — LLM-summarising long-term memory. Implemented but **not yet wired in**: `GraphAgent` still constructs `SlidingWindowMemory::new(20)` unconditionally. |
+| `summary.rs` | `SummaryMemory` — LLM-summarising long-term memory; enabled with `MEMORY_STRATEGY=summary` |
 
 ### `src/config.rs` — Configuration
 
@@ -195,6 +198,7 @@ Reads from the environment:
 | Ollama | `OLLAMA_HOST`, `OLLAMA_MODEL` |
 | OpenAI | `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` |
 | Vector store | `VECTOR_STORE_URI`, `VECTOR_TABLE_NAME` |
+| Memory | `MEMORY_STRATEGY`, `MEMORY_MAX_MESSAGES`, `MEMORY_SUMMARY_THRESHOLD` |
 
 Defaults live in the [Configuration Reference](reference/configuration.md) — this table is
 intentionally a map of *which variable belongs to which group*, not a second source of truth.
@@ -217,8 +221,9 @@ flowchart TD
     Args -->|"yes"| RunIndex["run_index path<br/>exits when RAG is unavailable"]
     Args -->|"no"| Prov["create_provider"]
     Prov -->|"LLM_PROVIDER=openai<br/>without key"| Fail(["AgentError::LLMError<br/>process exits"])
-    Prov -->|ok| Register["register 5 tools<br/>+ search_docs when RAG is up"]
-    Register --> Build["GraphAgent::new<br/>runner + SlidingWindowMemory(20)"]
+    Prov -->|ok| Mem["create_memory<br/>MEMORY_STRATEGY"]
+    Mem --> Register["register 5 tools<br/>+ search_docs when RAG is up"]
+    Register --> Build["GraphAgent::new<br/>provider · tools · memory"]
     Build --> Repl(["REPL loop<br/>'exit' or 'quit' to stop"])
 ```
 
@@ -236,7 +241,7 @@ sequenceDiagram
     autonumber
     participant U as User REPL
     participant A as GraphAgent
-    participant M as SlidingWindowMemory
+    participant M as ConversationMemory
     participant R as GraphRunner
     participant L as LLMNode
     participant P as LLMProvider
@@ -390,6 +395,6 @@ The full variant table is in the [API Reference](reference/api.md#error-types).
 |----------------------|------|
 | Which module owns a file | [Module Layout](#3-module-layout) above |
 | Why the graph orchestrator was chosen | [Design Notes §2](design.md#2-graph-型オーケストレーションを選んだ理由) |
-| Why `Box<dyn LLMProvider>` over `impl Trait` | [Design Notes §5.1](design.md#51-boxdyn-llmprovider-vs-impl-llmprovider) |
+| Why `Arc<dyn LLMProvider>` over `impl Trait` | [Design Notes §5.1](design.md#51-arcdyn-llmprovider-vs-impl-llmprovider) |
 | How to add a tool, provider, or graph node | [Guides](guides/) |
 | Every environment variable and its default | [Configuration Reference](reference/configuration.md) |
