@@ -6,6 +6,10 @@ pub struct Config {
     pub openai_api_key: Option<String>,
     pub openai_model: String,
     pub openai_base_url: String,
+    pub anthropic_api_key: Option<String>,
+    pub anthropic_model: String,
+    pub anthropic_base_url: String,
+    pub anthropic_max_tokens: usize,
     pub llm_provider: String,
     pub memory_strategy: String,
     pub memory_max_messages: usize,
@@ -30,6 +34,12 @@ impl Config {
             openai_model: std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string()),
             openai_base_url: std::env::var("OPENAI_BASE_URL")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            anthropic_model: std::env::var("ANTHROPIC_MODEL")
+                .unwrap_or_else(|_| "claude-sonnet-5-5".to_string()),
+            anthropic_base_url: std::env::var("ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|_| "https://api.anthropic.com".to_string()),
+            anthropic_max_tokens: env_usize("ANTHROPIC_MAX_TOKENS", 4096),
             llm_provider: std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "ollama".to_string()),
             memory_strategy: std::env::var("MEMORY_STRATEGY")
                 .unwrap_or_else(|_| "sliding".to_string()),
@@ -102,5 +112,38 @@ mod tests {
             let config = Config::from_env();
             assert_eq!(config.memory_max_messages, 20);
         });
+    }
+
+    #[test]
+    fn test_anthropic_defaults() {
+        temp_env::with_vars_unset(
+            ["ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_MAX_TOKENS"],
+            || {
+                let config = Config::from_env();
+                assert_eq!(config.anthropic_api_key, None);
+                assert_eq!(config.anthropic_model, "claude-sonnet-5-5");
+                assert_eq!(config.anthropic_base_url, "https://api.anthropic.com");
+                assert_eq!(config.anthropic_max_tokens, 4096);
+            },
+        );
+    }
+
+    #[test]
+    fn test_anthropic_custom_values() {
+        temp_env::with_vars(
+            [
+                ("ANTHROPIC_API_KEY", Some("sk-ant-test")),
+                ("ANTHROPIC_MODEL", Some("claude-opus-5-5")),
+                ("ANTHROPIC_BASE_URL", Some("https://example.test")),
+                ("ANTHROPIC_MAX_TOKENS", Some("2048")),
+            ],
+            || {
+                let config = Config::from_env();
+                assert_eq!(config.anthropic_api_key.as_deref(), Some("sk-ant-test"));
+                assert_eq!(config.anthropic_model, "claude-opus-5-5");
+                assert_eq!(config.anthropic_base_url, "https://example.test");
+                assert_eq!(config.anthropic_max_tokens, 2048);
+            },
+        );
     }
 }

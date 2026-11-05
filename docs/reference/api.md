@@ -28,7 +28,8 @@ pub struct StreamingChunk {
 ```
 
 `LLMNode` calls `chat_stream()` when `supports_streaming()` returns `true`, otherwise
-`chat()`. Both bundled providers (`OllamaProvider`, `OpenAIProvider`) return `true`.
+`chat()`. All bundled providers (`OllamaProvider`, `OpenAIProvider`, `AnthropicProvider`)
+return `true`.
 `chat_stream` and `supports_streaming` have default implementations, so a new provider only
 needs `chat` and `model_name` to be usable.
 
@@ -150,6 +151,26 @@ impl SummaryMemory {
 
 Opt-in strategy (`MEMORY_STRATEGY=summary`). Once the window overflows, the older half is
 summarised by the same provider and prepended to history as a `System` message.
+
+### `AnthropicProvider`
+
+```rust
+impl AnthropicProvider {
+    pub fn with_base_url(
+        api_key: String,
+        model: String,
+        base_url: String,
+        max_tokens: u32,
+    ) -> Self;
+}
+```
+
+Selected with `LLM_PROVIDER=anthropic`. It calls the Anthropic Messages API at
+`POST /v1/messages`. `System` messages are sent in the top-level `system` field,
+assistant tool calls become `tool_use` blocks, and `Tool` messages become `tool_result`
+blocks in a `user` message. Tool definitions use the `{name, description, input_schema}`
+shape. Streaming consumes Anthropic SSE events and returns one final `StreamingChunk`,
+matching the other providers.
 
 ### `State`
 

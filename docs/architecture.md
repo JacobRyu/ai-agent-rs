@@ -36,6 +36,7 @@ flowchart TD
     subgraph LLMLayer["src/llm/"]
         Ollama["OllamaProvider"]
         OpenAI["OpenAIProvider"]
+        Anthropic["AnthropicProvider"]
     end
 
     subgraph ToolLayer["src/tools/"]
@@ -56,6 +57,7 @@ flowchart TD
 
     LLMN -->|"chat / chat_stream"| Ollama
     LLMN -->|"chat / chat_stream"| OpenAI
+    LLMN -->|"chat / chat_stream"| Anthropic
     LLMN -.->|"next_node = tools"| TN
     TN -.->|"next_node = llm"| LLMN
 
@@ -146,6 +148,7 @@ The agent depends only on the `ConversationMemory` trait, not on either concrete
 |------|---------|
 | `ollama.rs` | `OllamaProvider` — calls Ollama `/api/chat` with tool support + NDJSON streaming |
 | `openai.rs` | `OpenAIProvider` — calls OpenAI-compatible `/chat/completions` + SSE streaming |
+| `anthropic.rs` | `AnthropicProvider` — calls the Messages API `/v1/messages` + SSE streaming |
 
 The active backend is selected by the `LLM_PROVIDER` environment variable. Adding another
 provider means implementing `LLMProvider` and registering it in `create_provider()`
@@ -197,6 +200,7 @@ Reads from the environment:
 | Provider selection | `LLM_PROVIDER` |
 | Ollama | `OLLAMA_HOST`, `OLLAMA_MODEL` |
 | OpenAI | `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` |
+| Anthropic | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MAX_TOKENS` |
 | Vector store | `VECTOR_STORE_URI`, `VECTOR_TABLE_NAME` |
 | Memory | `MEMORY_STRATEGY`, `MEMORY_MAX_MESSAGES`, `MEMORY_SUMMARY_THRESHOLD` |
 
@@ -220,7 +224,7 @@ flowchart TD
 
     Args -->|"yes"| RunIndex["run_index path<br/>exits when RAG is unavailable"]
     Args -->|"no"| Prov["create_provider"]
-    Prov -->|"LLM_PROVIDER=openai<br/>without key"| Fail(["AgentError::LLMError<br/>process exits"])
+    Prov -->|"selected provider<br/>without its API key"| Fail(["AgentError::LLMError<br/>process exits"])
     Prov -->|ok| Mem["create_memory<br/>MEMORY_STRATEGY"]
     Mem --> Register["register 5 tools<br/>+ search_docs when RAG is up"]
     Register --> Build["GraphAgent::new<br/>provider · tools · memory"]
@@ -229,8 +233,9 @@ flowchart TD
 
 The RAG subsystem is treated as **optional throughout**. If candle cannot load the model, or
 LanceDB cannot open the table, startup logs a warning and continues with a reduced tool set
-instead of aborting. The one hard failure at startup is selecting OpenAI without
-`OPENAI_API_KEY`, which returns `AgentError::LLMError` and exits.
+instead of aborting. The only hard failures at startup are selecting a cloud provider
+without its API key (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`), which returns
+`AgentError::LLMError` and exits.
 
 ## 5. Agent Execution Flow
 

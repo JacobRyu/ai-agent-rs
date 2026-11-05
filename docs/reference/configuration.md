@@ -6,10 +6,10 @@ All configuration is through environment variables.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLM_PROVIDER` | `ollama` | Which backend to use: `ollama` or `openai`. Any other value falls back to `ollama`. |
+| `LLM_PROVIDER` | `ollama` | Which backend to use: `ollama`, `openai`, or `anthropic`. Any other value falls back to `ollama`. |
 
-`LLM_PROVIDER` is the only way to select the OpenAI backend. Setting `OPENAI_API_KEY`
-alone does not switch providers.
+`LLM_PROVIDER` is the only way to select a cloud backend. Setting `OPENAI_API_KEY` or
+`ANTHROPIC_API_KEY` alone does not switch providers.
 
 ```bash
 # Use Ollama (default)
@@ -17,10 +17,15 @@ LLM_PROVIDER=ollama cargo run
 
 # Use OpenAI
 LLM_PROVIDER=openai OPENAI_API_KEY=sk-... cargo run
+
+# Use Anthropic
+LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... cargo run
 ```
 
-If `LLM_PROVIDER=openai` and `OPENAI_API_KEY` is unset, the agent exits at startup with
-`OPENAI_API_KEY must be set when LLM_PROVIDER=openai` (no API calls are made).
+If the selected provider's API key is unset, the agent exits at startup with an
+`AgentError::LLMError` (no API calls are made). The messages are
+`OPENAI_API_KEY must be set when LLM_PROVIDER=openai` and
+`ANTHROPIC_API_KEY must be set when LLM_PROVIDER=anthropic`.
 
 ## Ollama
 
@@ -41,7 +46,19 @@ Used when `LLM_PROVIDER=openai`.
 | `OPENAI_MODEL` | `gpt-4o` | Model name for chat completions |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | API base URL. Point this at any OpenAI-compatible endpoint (e.g. a local gateway). |
 
-Both providers support streaming responses, so no extra configuration is needed for that.
+## Anthropic
+
+Used when `LLM_PROVIDER=anthropic`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | (none, **required**) | API key. Read from the environment only; never passed on the command line. |
+| `ANTHROPIC_MODEL` | `claude-sonnet-5-5` | Model name for the Messages API |
+| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API base URL. The client appends `/v1/messages`. |
+| `ANTHROPIC_MAX_TOKENS` | `4096` | Maximum output tokens per response. Required by the Messages API. |
+
+All bundled providers support streaming responses, so no extra configuration is needed for
+that.
 
 ## Conversation Memory
 
@@ -93,5 +110,14 @@ RUST_LOG=info \
   OPENAI_API_KEY=sk-... \
   OPENAI_MODEL=gpt-4o \
   OPENAI_BASE_URL=https://api.openai.com/v1 \
+  cargo run
+```
+
+```bash
+RUST_LOG=info \
+  LLM_PROVIDER=anthropic \
+  ANTHROPIC_API_KEY=sk-ant-... \
+  ANTHROPIC_MODEL=claude-sonnet-5-5 \
+  ANTHROPIC_MAX_TOKENS=4096 \
   cargo run
 ```

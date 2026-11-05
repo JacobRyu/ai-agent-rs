@@ -152,7 +152,7 @@ pub struct Message {
 
 **なぜ OpenAI 互換フォーマットなのか**:
 - Ollama の `/api/chat` エンドポイントが OpenAI 互換フォーマットを使用
-- 今後 OpenAI/Anthropic プロバイダーを追加する際、メッセージ形式の変換が最小限で済む
+- OpenAI はそのまま利用でき、Anthropic は `tool_use` / `tool_result` への変換層だけを追加すれば済む
 - `serde(rename_all = "snake_case")` で JSON シリアライズが自動化
 
 **なぜ `tool_call_id` が Option なのか**: `Role::User` と `Role::Assistant` のメッセージには tool_call_id が不要。`skip_serializing_if` と組み合わせて不要フィールドを省略。
@@ -203,7 +203,7 @@ pub struct StreamingChunk {
 - Ollama の `/api/chat` は `stream` フラグで非同期 NDJSON 応答を切り替える（§7.1 で実装済み）
 - `chat()` は `stream: false`、`chat_stream()` は `stream: true` を送る
 - 現在の `LLMNode` は `supports_streaming()` が真なら `chat_stream()` を呼び、false の場合は
-  `chat()` にフォールバックする。`OllamaProvider` / `OpenAIProvider` はいずれも true を返す
+  `chat()` にフォールバックする。`OllamaProvider` / `OpenAIProvider` / `AnthropicProvider` はいずれも true を返す
 
 **内部型の設計**:
 ```rust
@@ -588,7 +588,7 @@ pub struct StreamingChunk {
 
 **OpenAI の実装**: SSE（Server-Sent Events）形式の `data: {...}` チャンクを処理。`data: [DONE]` でストリーム終了。
 
-**設計判断**: `LLMNode` は `provider.supports_streaming()` が真なら `chat_stream()` を呼び、`StreamingChunk` を `done: true` まで蓄積してから `LLMResponse` を組み立てる（`graph/nodes/react.rs`）。偽の場合は `chat()` にフォールバックする。`OllamaProvider` と `OpenAIProvider` はいずれも `supports_streaming() == true` を返すため、現状の実リクエスト経路では常にストリーミングが使われる。
+**設計判断**: `LLMNode` は `provider.supports_streaming()` が真なら `chat_stream()` を呼び、`StreamingChunk` を `done: true` まで蓄積してから `LLMResponse` を組み立てる（`graph/nodes/react.rs`）。偽の場合は `chat()` にフォールバックする。`OllamaProvider`、`OpenAIProvider`、`AnthropicProvider` はいずれも `supports_streaming() == true` を返すため、現状の実リクエスト経路では常にストリーミングが使われる。
 
 チャンクを蓄積してから初めて REPL に返すため、まだユーザーが感じるレイテンシ低減には
 つながっていない。ストリーミングが有効なのはプロバイダー間のリクエスト経路においてのみ。
@@ -712,6 +712,34 @@ let results_raw = join_all(futures).await;
 
 **なぜ `tokio::spawn` ではなく `join_all` なのか**: `ToolEngine` は `Send` だが `'static` ではない可能性がある。`join_all` はスコープ内の future を実行するため、所有権の問題が少ない。
 
+### 7.6 Anthropic プロバイダー
+
+**問題**: OpenAI 互換 API とはメッセージ形式が異なるため、同じ `LLMProvider` インターフェースのまま Anthropic Messages API を使えるようにする必要がある。
+
+**解決策**: `AnthropicProvider` を追加し、`LLM_PROVIDER=anthropic` で選択可能にした。
+
+```rust
+// llm/anthropic.rs
+pub struct AnthropicProvider {
+    client: Client,
+    api_key: String,
+    model: String,
+    base_url: String,
+    max_tokens: u32,
+}
+```
+
+**メッセージ変換**:
+- `Role::System` は `messages` に入れず、トップレベルの `system` に結合する
+- `Role::Tool` は `user` メッセージ内の `tool_result` ブロックに変換する
+- assistant の `tool_calls` は `tool_use` ブロックに変換する
+- `ToolDef.parameters` は `input_schema` として送る
+- 連続するツール結果は1つの `user` メッセージにまとめる（通常のユーザー発話とは混在させない）
+
+**ストリーミング**: SSE の `content_block_start` / `content_block_delta` / `content_block_stop` を読み、テキストと `input_json_delta` を蓄積してから1つの `StreamingChunk` を返す。既存の OpenAI 実装と同じ方式。
+
+**なぜ `max_tokens` を設定可能にするのか**: Messages API では必須であり、用途に応じて出力長を調整できるようにするため。既定は 4096。
+
 ---
 
 ## 8. 今後の改善案
@@ -720,6 +748,7 @@ let results_raw = join_all(futures).await;
 |------|------|--------|------|
 | Streaming UI 連携 | 準備完了 | 高 | `chat_stream` を使用したリアルタイム表示 |
 | SummaryMemory の統合 | ✅ 完了 | — | `MEMORY_STRATEGY` で `sliding` / `summary` を切り替え |
+| Anthropic プロバイダー | ✅ 完了 | — | Messages API と `tool_use` / `tool_result` の変換に対応 |
 | Web UI + Persistence | 未着手 | 中 | WebSocket ベースの対話 UI |
 | セッション永続化 | 未着手 | 中 | SQLite への会話履歴保存 |
 | エージェント間協調 | 未着手 | 低 | 複数エージェントの並列実行 |

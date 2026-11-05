@@ -1,7 +1,7 @@
 # ai-agent-rs Documentation
 
-A local-first AI agent in Rust. Runs against Ollama or OpenAI, uses a graph-based ReAct
-orchestrator, ships 5 built-in tools plus an optional RAG tool, local retrieval via
+A local-first AI agent in Rust. Runs against Ollama, OpenAI, or Anthropic, uses a graph-based
+ReAct orchestrator, ships 5 built-in tools plus an optional RAG tool, local retrieval via
 candle + LanceDB, and sliding-window conversation memory.
 
 ## How These Docs Split
@@ -51,7 +51,7 @@ owns the reasoning; the reference directory owns the exhaustive tables.
 
 - **Source Layout**: `src/` with `core/`, `llm/`, `agent/`, `tools/`, `rag/`, `memory/`
 - **Entry Point**: `src/main.rs`
-- **Tests**: `cargo test` (67 tests, no external services required)
+- **Tests**: `cargo test` (79 tests, no external services required)
 - **CI**: GitHub Actions — fmt, check, clippy, nextest (on `main` and `develop`)
 
 ## Status
@@ -67,8 +67,8 @@ owns the reasoning; the reference directory owns the exhaustive tables.
 | 2 (roadmap) | Streaming responses | ✅ Complete |
 | 2 (roadmap) | Index deduplication (hash-based) | ✅ Complete |
 | 3 (roadmap) | Parallel tool execution (futures::join_all) | ✅ Complete |
-| 4 | Cloud providers (OpenAI) | ✅ Complete |
+| 4 | Cloud providers (OpenAI, Anthropic) | ✅ Complete |
 | 5 | Web UI + persistence | ❌ Planned |
 | 3 (roadmap) | Streaming UI integration | ❌ Planned |
-| 3 (roadmap) | Anthropic provider | ❌ Planned |
+| 3 (roadmap) | Anthropic provider | ✅ Complete |
 | — | Long-term memory (`SummaryMemory`) | ✅ Complete (`MEMORY_STRATEGY=summary`) |

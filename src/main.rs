@@ -13,6 +13,7 @@ use tracing::{info, warn};
 use crate::agent::GraphAgent;
 use crate::config::Config;
 use crate::core::{AgentError, LLMProvider};
+use crate::llm::anthropic::AnthropicProvider;
 use crate::llm::ollama::OllamaProvider;
 use crate::llm::openai::OpenAIProvider;
 use crate::memory::{ConversationMemory, SlidingWindowMemory, SummaryMemory};
@@ -45,6 +46,21 @@ fn create_provider(config: &Config) -> Result<Arc<dyn LLMProvider>, AgentError> 
                 api_key.clone(),
                 config.openai_model.clone(),
                 config.openai_base_url.clone(),
+            )))
+        }
+        "anthropic" => {
+            let api_key = config.anthropic_api_key.as_ref().ok_or_else(|| {
+                AgentError::LLMError(
+                    "ANTHROPIC_API_KEY must be set when LLM_PROVIDER=anthropic".to_string(),
+                )
+            })?;
+            let max_tokens = u32::try_from(config.anthropic_max_tokens).unwrap_or(4096);
+
+            Ok(Arc::new(AnthropicProvider::with_base_url(
+                api_key.clone(),
+                config.anthropic_model.clone(),
+                config.anthropic_base_url.clone(),
+                max_tokens,
             )))
         }
         _ => Ok(Arc::new(OllamaProvider::new(
